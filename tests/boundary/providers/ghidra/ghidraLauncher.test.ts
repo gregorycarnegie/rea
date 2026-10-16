@@ -215,7 +215,13 @@ describe("Ghidra headless launcher", () => {
       arguments_.indexOf("/package/bridge/ReaGhidraBridge.java"),
     );
     for (const conflict of [
-      { psp: true as const },
+      {
+        consoleImport: {
+          loader: "PspElfLoader",
+          languageId: "Allegrex:LE:32:default",
+          compilerSpecId: "default",
+        },
+      },
       { dosMz: true as const },
       { dosCom: true as const },
       {

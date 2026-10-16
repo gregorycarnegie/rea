@@ -10,13 +10,30 @@ import type {
 } from "../../../src/domain/binaryTargetTypes.js";
 import { parseBinaryTarget } from "../../../src/application/BinaryTargetResolver.js";
 import { GhidraProvider } from "../../../src/ghidra/GhidraProvider.js";
-import { ghidraProcessorUnsupportedReason } from "../../../src/ghidra/GhidraPspProfile.js";
-import { inspectGhidraPspExtension } from "../../../src/ghidra/GhidraPspExtension.js";
+import {
+  GHIDRA_CONSOLE_PROFILES,
+  ghidraProcessorUnsupportedReason,
+} from "../../../src/ghidra/GhidraConsoleProfile.js";
+import { inspectGhidraConsoleExtension } from "../../../src/ghidra/GhidraConsoleExtension.js";
 import {
   GhidraHeadlessLauncher,
   ghidraHeadlessArguments,
 } from "../../../src/ghidra/GhidraLauncher.js";
 import type { GhidraInstallationHost } from "../../../src/ghidra/GhidraInstallation.js";
+
+const consoleProfile = (id: "psp" | "ps2") => {
+  const profile = GHIDRA_CONSOLE_PROFILES.find((value) => value.id === id);
+  if (profile === undefined) throw new Error(`Missing ${id} console profile`);
+  return profile;
+};
+const pspProfile = consoleProfile("psp");
+const inspectGhidraPspExtension = (root: string, version: string) =>
+  inspectGhidraConsoleExtension(pspProfile.extension, root, version);
+const pspImport = {
+  loader: pspProfile.loader,
+  languageId: pspProfile.languageId,
+  compilerSpecId: pspProfile.compilerSpecId,
+};
 
 // Synthetic installation files exercise the filesystem/profile boundary, not
 // Allegrex execution. Only the optional real CLI/MCP lane proves tool behavior.
@@ -157,7 +174,11 @@ describe.skipIf(process.platform === "win32")(
         configurationDirectoryName: "ghidra_12.1.3_PUBLIC",
         javaHome: "/jdk-21",
         bridgeScriptPath: "/packaged/ReaGhidraBridge.java",
-        pspExtension: extension,
+        consoleImport: {
+          ...pspImport,
+          extension: pspProfile.extension,
+          identity: extension,
+        },
         spawnProcess: spawn,
       });
       const launched = await launcher.launch({
@@ -518,12 +539,18 @@ describe.skipIf(process.platform === "win32")(
       };
       const languageOverride = { languageId: "x86:LE:64:default" };
       expect(() =>
-        ghidraHeadlessArguments({ ...paths, psp: true, languageOverride }),
-      ).toThrow("PSP ELF import cannot be combined");
+        ghidraHeadlessArguments({
+          ...paths,
+          consoleImport: pspImport,
+          languageOverride,
+        }),
+      ).toThrow("console ELF import cannot be combined");
       expect(ghidraHeadlessArguments({ ...paths, languageOverride })).toEqual(
         expect.arrayContaining(["-processor", "x86:LE:64:default"]),
       );
-      expect(ghidraHeadlessArguments({ ...paths, psp: true })).toEqual(
+      expect(
+        ghidraHeadlessArguments({ ...paths, consoleImport: pspImport }),
+      ).toEqual(
         expect.arrayContaining([
           "-loader",
           "PspElfLoader",
@@ -542,7 +569,9 @@ describe.skipIf(process.platform === "win32")(
         ghidraLogPath: "/log",
         scriptLogPath: "/scriptlog",
       };
-      expect(ghidraHeadlessArguments({ ...paths, psp: true })).toEqual(
+      expect(
+        ghidraHeadlessArguments({ ...paths, consoleImport: pspImport }),
+      ).toEqual(
         expect.arrayContaining([
           "-loader",
           "PspElfLoader",
@@ -591,5 +620,272 @@ describe.skipIf(process.platform === "win32")(
         expect(extension.sha256).not.toBe(canonical.sha256);
       },
     );
+  },
+);
+
+// PS2: the Emotion Engine profile is verified on Windows x64 with
+// ghidra-emotionengine-reloaded. Synthetic files exercise the same boundary.
+const ps2Profile = consoleProfile("ps2");
+const ps2Target = {
+  kind: "executable",
+  format: "elf",
+  architecture: "mips",
+  availableArchitectures: ["mips"],
+  path: "/caller/ps2.elf",
+  sha256: "c".repeat(64),
+  mips: {
+    elfClass: 32,
+    byteOrder: "little",
+    type: 2,
+    flags: 0x20924000,
+    gnuAttributes: null,
+    abiFlags: null,
+  },
+} satisfies BinaryTarget;
+// The PS2 profile is verified on Windows x64, so its installation boundary runs
+// against real Windows paths and a JVM reporting Windows.
+const ps2Host: GhidraInstallationHost = {
+  ...host,
+  platform: "win32",
+  probeJava: () => ({
+    osArch: "amd64",
+    osName: "Windows 11",
+    version: "21.0.12",
+    major: 21,
+    home: "C:jdk-21",
+    bits: 64,
+    runtime: "jdk",
+  }),
+};
+async function ps2Installation() {
+  const directory = await createTestTempDirectory("rea-ps2-profile-");
+  const root = join(
+    directory,
+    "Ghidra",
+    "Extensions",
+    "ghidra-emotionengine-reloaded",
+  );
+  const contents = {
+    "Module.manifest": "",
+    "extension.properties":
+      "name=ghidra-emotionengine-reloaded\nversion=12.1.3\n",
+    "data/languages/emotionengine.ldefs": "synthetic language definition",
+    "data/languages/r5900.sla": "synthetic compiled processor",
+    "data/languages/r5900.pspec": "synthetic processor specification",
+    "data/languages/r5900.cspec": "synthetic compiler specification",
+    "lib/ghidra-emotionengine-reloaded.jar": "synthetic loader artifact",
+  };
+  for (const [path, text] of Object.entries(contents)) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await writeFile(join(root, path), text);
+  }
+  await mkdir(join(directory, "support"));
+  const parsed = parseConfig({ GHIDRA_INSTALL_DIR: directory });
+  if (!parsed.ok) throw parsed.error;
+  return {
+    directory,
+    root,
+    config: parsed.value,
+    provider: new GhidraProvider(parsed.value, silentLogger, {}, ps2Host),
+  };
+}
+
+/** An EE-linker-shaped ELF32 header: MIPS III, R5900, EABI64, no ABI record. */
+const ps2ElfBytes = (): Buffer => {
+  const bytes = Buffer.alloc(4096);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 1, 1, 1]);
+  bytes.writeUInt16LE(2, 16); // ET_EXEC
+  bytes.writeUInt16LE(8, 18); // EM_MIPS
+  bytes.writeUInt32LE(1, 20);
+  bytes.writeUInt32LE(0x00100000, 24); // e_entry
+  bytes.writeUInt32LE(52, 28); // e_phoff
+  bytes.writeUInt32LE(0x20924000, 36); // e_flags
+  bytes.writeUInt16LE(52, 40);
+  bytes.writeUInt16LE(32, 42);
+  bytes.writeUInt16LE(1, 44); // one PT_LOAD
+  bytes.writeUInt32LE(1, 52); // PT_LOAD
+  bytes.writeUInt32LE(0x1000, 56); // p_offset
+  bytes.writeUInt32LE(0x00100000, 60); // p_vaddr
+  bytes.writeUInt32LE(0x00100000, 64); // p_paddr
+  bytes.writeUInt32LE(0x1000, 68); // p_filesz
+  bytes.writeUInt32LE(0x1000, 72); // p_memsz
+  bytes.writeUInt32LE(5, 76); // R+X
+  return bytes;
+};
+
+describe.skipIf(process.platform !== "win32")(
+  "PS2 installed-extension and profile boundary",
+  () => {
+    it("commits the pinned EE loader, language and extension identity", async () => {
+      const { provider, root } = await ps2Installation();
+      expect(provider.inspectTargetSupport(ps2Target).status).toBe("supported");
+      const first = await provider.resolveAnalysisProfile(ps2Target);
+      if (!first.ok) throw first.error;
+      expect(first.value.profile?.parameters).toMatchObject({
+        architecture: "mips",
+        language_id: "r5900:LE:32:default",
+        compiler_spec_id: "default",
+        loader: "ElfLoader",
+        mips_support_lane: "ps2-elf32-exec-eabi64-r5900-v1",
+        mips_elf: { elf_class: 32, flags: 0x20924000, abi_flags: null },
+        ps2_extension: {
+          id: "ghidra-emotionengine-reloaded",
+          ghidra_version: "12.1.3",
+          sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
+      });
+      expect(first.value.profile?.parameters).not.toHaveProperty(
+        "psp_extension",
+      );
+      await writeFile(
+        join(root, "data/languages/r5900.sla"),
+        "changed processor semantics",
+      );
+      const changed = await provider.resolveAnalysisProfile(ps2Target);
+      if (!changed.ok) throw changed.error;
+      expect(changed.value.profile?.digest).not.toBe(
+        first.value.profile?.digest,
+      );
+    });
+
+    it("is served only on its separately verified host", async () => {
+      const { config } = await ps2Installation();
+      for (const platform of ["linux", "darwin"] as const) {
+        const provider = new GhidraProvider(
+          config,
+          silentLogger,
+          {},
+          { ...host, platform },
+        );
+        const support = provider.inspectTargetSupport(ps2Target);
+        expect(support.status).toBe("unsupported");
+        expect(support.reason).toContain("verified on Windows x64 only");
+      }
+    });
+
+    it.each([
+      [{ byteOrder: "big" }, "little-endian"],
+      [{ elfClass: 64 }, "ELF32"],
+      [{ type: 1 }, "ET_EXEC"],
+      [{ flags: 0x20924001 }, "0x20924000"],
+      [{ flags: 0x20920000 }, "0x20924000"],
+      [{ flags: 0x30924000 }, "0x20924000"],
+      [{ abiFlags: undefined }, "inspected MIPS ABI flags declaration source"],
+      [{ abiFlags: pspAbiFlags }, "without a separate MIPS ABI flags record"],
+    ])(
+      "refuses unverified PS2 declarations %j before extension reads",
+      async (change, reason) => {
+        const { provider, root } = await ps2Installation();
+        await rename(root, `${root}-unavailable`);
+        const altered = {
+          ...ps2Target,
+          mips: { ...ps2Target.mips, ...change },
+        } as BinaryTarget;
+        expect(ghidraProcessorUnsupportedReason(altered)).toContain(reason);
+        expect(provider.inspectTargetSupport(altered).status).toBe(
+          "unsupported",
+        );
+        const result = await provider.resolveAnalysisProfile(altered);
+        expect(result.ok).toBe(false);
+        if (result.ok) throw new Error("Invalid PS2 target was admitted");
+        expect(result.error._tag).toBe("AnalysisUnsupportedTargetError");
+      },
+    );
+  },
+);
+
+describe.skipIf(process.platform !== "win32")(
+  "PS2 extension, configuration and target reader boundary",
+  () => {
+    it("requires the caller-installed extension", async () => {
+      const { provider, root } = await ps2Installation();
+      await rename(root, `${root}-removed`);
+      const missing = await provider.resolveAnalysisProfile(ps2Target);
+      expect(missing.ok).toBe(false);
+      if (missing.ok) throw new Error("Missing extension was accepted");
+      expect(missing.error.message).toContain("PS2_EXTENSION_UNAVAILABLE");
+      expect(missing.error.message).toContain("ghidra-emotionengine-reloaded");
+    });
+
+    it("refuses a configured generic processor", async () => {
+      const { directory } = await ps2Installation();
+      const config = parseConfig({
+        GHIDRA_INSTALL_DIR: directory,
+        REA_GHIDRA_LANGUAGE_ID: "MIPS:LE:32:default",
+      });
+      if (!config.ok) throw config.error;
+      const provider = new GhidraProvider(
+        config.value,
+        silentLogger,
+        {},
+        ps2Host,
+      );
+      const result = await provider.resolveAnalysisProfile(ps2Target);
+      expect(result.ok).toBe(false);
+      if (result.ok)
+        throw new Error("Conflicting language override was accepted");
+      expect(result.error.message).toContain(
+        "PS2 Emotion Engine profile does not accept REA_GHIDRA_LANGUAGE_ID overrides",
+      );
+    });
+
+    it("admits an EE ELF read by the real target reader", async () => {
+      const { directory, provider } = await ps2Installation();
+      const path = join(directory, "ps2.elf");
+      await writeFile(path, ps2ElfBytes());
+      const parsed = await parseBinaryTarget(path);
+      if (!parsed.ok) throw parsed.error;
+      if (
+        parsed.value.kind !== "executable" ||
+        parsed.value.architecture !== "mips"
+      )
+        throw new Error("PS2 ELF was not recognized as MIPS");
+      expect(parsed.value.mips).toMatchObject({
+        flags: 0x20924000,
+        abiFlags: null,
+        gnuAttributes: null,
+      });
+      expect(provider.inspectTargetSupport(parsed.value).status).toBe(
+        "supported",
+      );
+      const profile = await provider.resolveAnalysisProfile(parsed.value);
+      if (!profile.ok) throw profile.error;
+      expect(profile.value.profile?.parameters.language_id).toBe(
+        "r5900:LE:32:default",
+      );
+    });
+
+    it("forces the PS2 loader and language only for the selected profile", () => {
+      const paths = {
+        projectRoot: "/project",
+        targetPath: "/target.elf",
+        bridgeScriptPath: "/bridge/Rea.java",
+        descriptorPath: "/session",
+        ghidraLogPath: "/log",
+        scriptLogPath: "/scriptlog",
+      };
+      expect(
+        ghidraHeadlessArguments({
+          ...paths,
+          consoleImport: {
+            loader: ps2Profile.loader,
+            languageId: ps2Profile.languageId,
+            compilerSpecId: ps2Profile.compilerSpecId,
+          },
+        }),
+      ).toEqual(
+        expect.arrayContaining([
+          "-loader",
+          "ElfLoader",
+          "-processor",
+          "r5900:LE:32:default",
+          "-cspec",
+          "default",
+        ]),
+      );
+      expect(ghidraHeadlessArguments(paths)).not.toContain(
+        "r5900:LE:32:default",
+      );
+    });
   },
 );

@@ -44,9 +44,10 @@ import {
   readGhidraLanguageCatalog,
 } from "./GhidraLanguageCatalog.js";
 import {
+  ghidraConsoleHostSupported,
+  ghidraConsoleProfile,
   ghidraProcessorUnsupportedReason,
-  isGhidraPspTarget,
-} from "./GhidraPspProfile.js";
+} from "./GhidraConsoleProfile.js";
 import { resolveGhidraExtensions } from "./extensions/GhidraExtensions.js";
 import {
   CAPABILITIES,
@@ -181,14 +182,31 @@ export class GhidraProvider implements AnalysisProviderCandidate {
         reason: `Ghidra v1 imports executable targets, not ${target.kind} targets.`,
         diagnostics,
       };
+    const hostArchitecture =
+      this.installationHost?.architecture ?? process.arch;
+    const consoleProfile = ghidraConsoleProfile(target);
+    if (
+      consoleProfile !== undefined &&
+      !ghidraConsoleHostSupported(
+        consoleProfile,
+        hostPlatform,
+        hostArchitecture,
+      )
+    )
+      return {
+        status: "unsupported",
+        code: "architecture_unsupported",
+        reason: `The initial ${consoleProfile.displayName} profile is verified on ${consoleProfile.hostDescription} only.`,
+        diagnostics,
+      };
     if (hostPlatform === "win32")
-      return inspectWindowsP0TargetSupport(target, diagnostics);
-    const mipsReason =
-      isGhidraPspTarget(target) &&
-      (hostPlatform !== "linux" ||
-        (this.installationHost?.architecture ?? process.arch) !== "x64")
-        ? "The initial PSP Allegrex profile is verified on Linux x64 only."
-        : ghidraProcessorUnsupportedReason(target);
+      return consoleProfile === undefined
+        ? inspectWindowsP0TargetSupport(target, diagnostics)
+        : consoleTargetSupport(
+            consoleProfile.unsupportedReason(target),
+            diagnostics,
+          );
+    const mipsReason = ghidraProcessorUnsupportedReason(target);
     if (mipsReason !== null)
       return {
         status: "unsupported",
@@ -346,6 +364,20 @@ export class GhidraProvider implements AnalysisProviderCandidate {
 
 const providerFailureText = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
+
+/** A console profile verified on this host owns its target's admission. */
+const consoleTargetSupport = (
+  reason: string | null,
+  diagnostics: Readonly<Record<string, JsonValue>>,
+): ProviderTargetSupport =>
+  reason === null
+    ? { status: "supported", code: null, reason: null, diagnostics }
+    : {
+        status: "unsupported",
+        code: "architecture_unsupported",
+        reason,
+        diagnostics,
+      };
 
 const inspectWindowsP0TargetSupport = (
   target: BinaryTarget,

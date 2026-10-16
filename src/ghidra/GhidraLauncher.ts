@@ -46,9 +46,10 @@ import {
 } from "./extensions/GhidraExtensions.js";
 
 import {
-  inspectGhidraPspExtension,
-  type GhidraPspExtension,
-} from "./GhidraPspExtension.js";
+  inspectGhidraConsoleExtension,
+  type GhidraConsoleExtension,
+  type GhidraConsoleExtensionRequirement,
+} from "./GhidraConsoleExtension.js";
 
 /** Private paths and identity material for one headless Ghidra import. */
 export interface GhidraLaunchSession {
@@ -220,7 +221,11 @@ export interface GhidraHeadlessLauncherOptions {
   /** Caller seeds committed by the analysis profile, applied before analysis. */
   readonly analysisSeeds?: GhidraSeedCommitment;
   readonly analysisExtensions?: readonly GhidraExtension[];
-  readonly pspExtension?: GhidraPspExtension;
+  /** A console profile's pinned import and the extension identity it committed. */
+  readonly consoleImport?: GhidraConsoleImport & {
+    readonly extension: GhidraConsoleExtensionRequirement;
+    readonly identity: GhidraConsoleExtension;
+  };
   /** Remap typed float storage for the soft-float o32 ABI after analysis. */
   readonly mipsSoftFloat?: true;
   /** Spawn seam for provider-boundary lifecycle tests. */
@@ -255,29 +260,31 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
         throw new GhidraLaunchError(
           "Ghidra configuration directory identity is unresolved; restore application.version and application.release.name in the selected installation's application.properties.",
         );
-      const psp = this.options.pspExtension;
-      if (psp !== undefined) {
+      const consoleImport = this.options.consoleImport;
+      if (consoleImport !== undefined) {
+        const { extension, identity } = consoleImport;
         const installedRoot = await realpath(
           join(
             dirname(this.options.analyzeHeadlessPath),
             "..",
             "Ghidra",
             "Extensions",
-            "ghidra-allegrex",
+            extension.id,
           ),
         );
-        if (installedRoot !== psp.root)
+        if (installedRoot !== identity.root)
           throw new GhidraLaunchError(
-            "Allegrex profile does not belong to the selected Ghidra installation.",
+            `${extension.displayName} profile does not belong to the selected Ghidra installation.`,
           );
-        const inspected = await inspectGhidraPspExtension(
-          psp.root,
-          psp.ghidra_version,
+        const inspected = await inspectGhidraConsoleExtension(
+          extension,
+          identity.root,
+          identity.ghidra_version,
           options.signal,
         );
-        if (inspected.sha256 !== psp.sha256)
+        if (inspected.sha256 !== identity.sha256)
           throw new GhidraLaunchError(
-            "Installed Allegrex content changed since profile resolution; reopen the target to resolve a fresh profile.",
+            `Installed ${extension.displayName} content changed since profile resolution; reopen the target to resolve a fresh profile.`,
           );
       }
       await createGhidraRuntimeDirectories(
@@ -316,7 +323,15 @@ export class GhidraHeadlessLauncher implements GhidraLauncher {
         return err(new AnalysisCancelledError("open_binary"));
       const headlessArguments = ghidraHeadlessArguments({
         platform,
-        ...(psp === undefined ? {} : { psp: true as const }),
+        ...(consoleImport === undefined
+          ? {}
+          : {
+              consoleImport: {
+                loader: consoleImport.loader,
+                languageId: consoleImport.languageId,
+                compilerSpecId: consoleImport.compilerSpecId,
+              },
+            }),
         ...(this.options.mipsSoftFloat === undefined
           ? {}
           : { mipsSoftFloat: this.options.mipsSoftFloat }),
@@ -615,6 +630,13 @@ const cleanupStartedProcess = (
       ? cleanupWindowsProcessTree(started.ownership.leaderPid)
       : cleanupOwnedProcessGroup(started.ownership);
 
+/** A console profile's pinned loader, language and compiler specification. */
+export interface GhidraConsoleImport {
+  readonly loader: string;
+  readonly languageId: string;
+  readonly compilerSpecId: string;
+}
+
 /** Paths encoded into one bounded analyzeHeadless invocation. */
 export interface GhidraHeadlessArgumentOptions {
   readonly platform?: NodeJS.Platform;
@@ -624,7 +646,7 @@ export interface GhidraHeadlessArgumentOptions {
   readonly descriptorPath: string;
   readonly ghidraLogPath: string;
   readonly scriptLogPath: string;
-  readonly psp?: true;
+  readonly consoleImport?: GhidraConsoleImport;
   readonly mipsSoftFloat?: true;
   readonly dosMz?: true;
   readonly dosCom?: true;
@@ -651,22 +673,23 @@ export const ghidraHeadlessArguments = (
   const bridgeDirectory = scriptPath.dirname(options.bridgeScriptPath);
   const override = options.languageOverride;
   const rawBinary = options.rawBinary;
+  const consoleImport = options.consoleImport;
   if (
-    options.psp === true &&
+    consoleImport !== undefined &&
     (options.dosMz === true ||
       options.dosCom === true ||
       override !== undefined)
   )
     throw new Error(
-      "A PSP ELF import cannot be combined with DOS or a generic Ghidra language override.",
+      "A console ELF import cannot be combined with DOS or a generic Ghidra language override.",
     );
-  if (options.psp === true && rawBinary !== undefined)
+  if (consoleImport !== undefined && rawBinary !== undefined)
     throw new Error(
-      "A PSP ELF import cannot be combined with a raw-binary import.",
+      "A console ELF import cannot be combined with a raw-binary import.",
     );
   if (
     options.mipsSoftFloat === true &&
-    (options.psp === true ||
+    (consoleImport !== undefined ||
       options.dosMz === true ||
       options.dosCom === true ||
       rawBinary !== undefined)
@@ -718,14 +741,14 @@ export const ghidraHeadlessArguments = (
             "default",
           ]
         : rawBinary === undefined
-          ? options.psp === true
+          ? consoleImport !== undefined
             ? [
                 "-loader",
-                "PspElfLoader",
+                consoleImport.loader,
                 "-processor",
-                "Allegrex:LE:32:default",
+                consoleImport.languageId,
                 "-cspec",
-                "default",
+                consoleImport.compilerSpecId,
               ]
             : override !== undefined
               ? [

@@ -61,11 +61,8 @@ import {
   ghidraInstallationDiagnostics,
   type GhidraInstallationInspection,
 } from "./GhidraInstallation.js";
-import {
-  isGhidraPspTarget,
-  GHIDRA_PSP_LIMITATIONS,
-} from "./GhidraPspProfile.js";
-import { ghidraPspExtensionSchema } from "./GhidraPspExtension.js";
+import { ghidraConsoleProfile } from "./GhidraConsoleProfile.js";
+import { ghidraConsoleExtensionSchema } from "./GhidraConsoleExtension.js";
 import {
   GHIDRA_MIPS_SOFT_FLOAT_STORAGE,
   ghidraMipsSoftFloatFailure,
@@ -384,23 +381,26 @@ export const createGhidraProviderClient = (input: {
   );
   if (!prerequisites.ok) return unavailableClient(prerequisites.error);
   const committedProfile = prerequisites.value.profile;
-  const psp = isGhidraPspTarget(target);
-  const pspExtension = psp
-    ? ghidraPspExtensionSchema.safeParse(
-        committedProfile.parameters.psp_extension,
-      )
-    : null;
+  const consoleProfile = ghidraConsoleProfile(target);
+  const consoleExtension =
+    consoleProfile === undefined
+      ? null
+      : ghidraConsoleExtensionSchema.safeParse(
+          committedProfile.parameters[consoleProfile.extensionParameter],
+        );
   if (
-    pspExtension !== null &&
-    (!pspExtension.success ||
-      committedProfile.parameters.language_id !== "Allegrex:LE:32:default" ||
-      committedProfile.parameters.loader !== "PspElfLoader")
+    consoleProfile !== undefined &&
+    (consoleExtension?.success !== true ||
+      consoleExtension.data.id !== consoleProfile.extension.id ||
+      committedProfile.parameters.language_id !== consoleProfile.languageId ||
+      committedProfile.parameters.compiler_spec_id !==
+        consoleProfile.compilerSpecId ||
+      committedProfile.parameters.loader !== consoleProfile.loader)
   )
     return unavailableClient(
       new ProviderAdapterError("ghidra", "open_binary", {
         diagnostics: {
-          reason:
-            "Resolve the supported PSP profile and installed Allegrex extension before opening the session.",
+          reason: `Resolve the supported ${consoleProfile.displayName} profile and installed ${consoleProfile.extension.displayName} extension before opening the session.`,
         },
       }),
     );
@@ -593,9 +593,17 @@ export const createGhidraProviderClient = (input: {
           import.meta.url,
         ),
       ),
-      ...(pspExtension?.success === true
-        ? { pspExtension: pspExtension.data }
-        : {}),
+      ...(consoleProfile === undefined || consoleExtension?.success !== true
+        ? {}
+        : {
+            consoleImport: {
+              loader: consoleProfile.loader,
+              languageId: consoleProfile.languageId,
+              compilerSpecId: consoleProfile.compilerSpecId,
+              extension: consoleProfile.extension,
+              identity: consoleExtension.data,
+            },
+          }),
       ...(softFloat ? { mipsSoftFloat: true as const } : {}),
       ...(target.format === "dos-mz" ? { dosMz: true } : {}),
       ...(target.format === "dos-com" ? { dosCom: true } : {}),
@@ -647,12 +655,12 @@ export const createGhidraProviderClient = (input: {
             expectedLanguageId: rawLanguage.languageId,
             expectedCompilerSpecId: rawLanguage.compilerSpecId,
           }),
-    ...(psp
-      ? {
-          expectedLanguageId: "Allegrex:LE:32:default",
-          expectedCompilerSpecId: "default",
-        }
-      : {}),
+    ...(consoleProfile === undefined
+      ? {}
+      : {
+          expectedLanguageId: consoleProfile.languageId,
+          expectedCompilerSpecId: consoleProfile.compilerSpecId,
+        }),
     ...(context === undefined ? {} : { runId: context.runId }),
     logger: logger.child({ layer: "ghidra-bridge" }),
   });
@@ -719,7 +727,7 @@ export const createGhidraProviderClient = (input: {
   const sessionLimitations = (): readonly string[] => [
     ...providerLimitations,
     ...targetLimitations,
-    ...(psp ? GHIDRA_PSP_LIMITATIONS : []),
+    ...(consoleProfile?.limitations ?? []),
     ...softFloatLimitations,
     ...ghidraExtensionLimitations(extensions),
     ...seedLimitations,

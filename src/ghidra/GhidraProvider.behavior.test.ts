@@ -2998,3 +2998,72 @@ describe("Ghidra OOME error projection", () => {
     expect(projected.code).not.toBe("resource_constraint");
   });
 });
+
+describe("Ghidra console profile host admission", () => {
+  const mipsTarget = (
+    flags: number,
+    abiFlags: null | undefined = null,
+  ): BinaryTarget => ({
+    kind: "executable",
+    format: "elf",
+    architecture: "mips",
+    availableArchitectures: ["mips"],
+    path: "/caller/console.elf",
+    sha256: "d".repeat(64),
+    mips: {
+      elfClass: 32,
+      byteOrder: "little",
+      type: 2,
+      flags,
+      gnuAttributes: null,
+      ...(abiFlags === undefined ? {} : { abiFlags }),
+    },
+  });
+
+  it("serves the PS2 profile on Windows x64 and nowhere it is unverified", () => {
+    const ps2 = mipsTarget(0x20924000);
+    expect(
+      provider(installationHost("win32")).inspectTargetSupport(ps2),
+    ).toMatchObject({ status: "supported" });
+    for (const platform of ["linux", "darwin"] as const)
+      expect(
+        provider(installationHost(platform)).inspectTargetSupport(ps2),
+      ).toMatchObject({
+        status: "unsupported",
+        code: "architecture_unsupported",
+        reason:
+          "The initial PS2 Emotion Engine profile is verified on Windows x64 only.",
+      });
+  });
+
+  it("applies the PS2 admission on Windows instead of the PE-only P0 gate", () => {
+    expect(
+      provider(installationHost("win32")).inspectTargetSupport(
+        mipsTarget(0x20924001),
+      ),
+    ).toMatchObject({
+      status: "unsupported",
+      code: "architecture_unsupported",
+      reason: expect.stringContaining("0x20924000"),
+    });
+  });
+
+  it("keeps the PSP profile on Linux x64 and other MIPS on the P0 gate", () => {
+    expect(
+      provider(installationHost("win32")).inspectTargetSupport(
+        mipsTarget(0x10a23001),
+      ),
+    ).toMatchObject({
+      status: "unsupported",
+      reason: "The initial PSP Allegrex profile is verified on Linux x64 only.",
+    });
+    expect(
+      provider(installationHost("win32")).inspectTargetSupport(
+        mipsTarget(0x70001000),
+      ),
+    ).toMatchObject({
+      status: "unsupported",
+      code: "target_format_unsupported",
+    });
+  });
+});

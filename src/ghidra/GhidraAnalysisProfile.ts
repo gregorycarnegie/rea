@@ -29,10 +29,10 @@ import {
 import { ghidraRawBinaryLanguage } from "./GhidraRawBinaryLanguage.js";
 
 import {
+  ghidraConsoleProfile,
   ghidraProcessorUnsupportedReason,
-  isGhidraPspTarget,
-} from "./GhidraPspProfile.js";
-import { resolveGhidraPspExtension } from "./GhidraPspExtension.js";
+} from "./GhidraConsoleProfile.js";
+import { resolveGhidraConsoleExtension } from "./GhidraConsoleExtension.js";
 import {
   NATIVE_AOT_MAX_REPORT_BYTES,
   NATIVE_AOT_MAX_SOURCE_BYTES,
@@ -86,19 +86,26 @@ export const resolveGhidraAnalysisProfile = async (
         ),
       ),
     );
-  // A caller-selected generic processor cannot override this verified PSP loader.
-  if (isGhidraPspTarget(target) && languageOverride !== undefined)
+  // A caller-selected generic processor cannot override a verified console loader.
+  const consoleProfile = ghidraConsoleProfile(target);
+  if (consoleProfile !== undefined && languageOverride !== undefined)
     return err(
       new AnalysisUnsupportedTargetError(
         "resolve_analysis_profile",
         target.path,
-        "The bounded PSP Allegrex profile does not accept REA_GHIDRA_LANGUAGE_ID overrides.",
+        `The bounded ${consoleProfile.displayName} profile does not accept REA_GHIDRA_LANGUAGE_ID overrides.`,
       ),
     );
-  const pspExtension = isGhidraPspTarget(target)
-    ? await resolveGhidraPspExtension(installation, signal)
-    : null;
-  if (pspExtension !== null && !pspExtension.ok) return pspExtension;
+  const consoleExtension =
+    consoleProfile === undefined
+      ? null
+      : await resolveGhidraConsoleExtension(
+          consoleProfile,
+          installation,
+          signal,
+        );
+  if (consoleExtension !== null && !consoleExtension.ok)
+    return consoleExtension;
   const provider = { ...identity, version: installation.providerVersion };
   const analyzerParameters =
     disabledAnalyzers === undefined || disabledAnalyzers.length === 0
@@ -308,13 +315,15 @@ export const resolveGhidraAnalysisProfile = async (
         ...ghidraMipsProfileParameters(target, languageOverride),
         ...ghidraRiscvProfileParameters(target),
         ...ghidraPowerPcProfileParameters(target),
-        ...(pspExtension?.ok === true
+        ...(consoleProfile !== undefined && consoleExtension?.ok === true
           ? {
-              mips_support_lane: "psp-elf32-exec-eabi32-allegrex-v2",
-              loader: "PspElfLoader",
-              language_id: "Allegrex:LE:32:default",
-              compiler_spec_id: "default",
-              psp_extension: { ...pspExtension.value },
+              mips_support_lane: consoleProfile.lane,
+              loader: consoleProfile.loader,
+              language_id: consoleProfile.languageId,
+              compiler_spec_id: consoleProfile.compilerSpecId,
+              [consoleProfile.extensionParameter]: {
+                ...consoleExtension.value,
+              },
             }
           : {}),
       }),
